@@ -475,6 +475,16 @@ pub const Action = union(enum) {
     /// lines.
     scroll_page_lines: i16,
 
+    /// Start a one-cell selection at the terminal cursor.
+    ///
+    /// If a selection already exists, it is replaced.
+    start_selection,
+
+    /// Swap the fixed and adjustable endpoints of the current selection.
+    ///
+    /// This does nothing when there is no selection.
+    toggle_selection_endpoint,
+
     /// Adjust the current selection in the given direction or position,
     /// relative to the cursor.
     ///
@@ -1425,6 +1435,8 @@ pub const Action = union(enum) {
             .scroll_page_down,
             .scroll_page_fractional,
             .scroll_page_lines,
+            .start_selection,
+            .toggle_selection_endpoint,
             .adjust_selection,
             .jump_to_prompt,
             .write_scrollback_file,
@@ -4572,6 +4584,16 @@ test "parse: set_font_size" {
         try testing.expect(binding.action == .set_font_size);
         try testing.expectEqual(13.5, binding.action.set_font_size);
     }
+}
+
+test "parse: selection actions" {
+    const testing = std.testing;
+
+    const start_binding = try parseSingle("a=start_selection");
+    try testing.expect(start_binding.action == .start_selection);
+
+    const toggle_binding = try parseSingle("a=toggle_selection_endpoint");
+    try testing.expect(toggle_binding.action == .toggle_selection_endpoint);
 }
 
 test "parse: copy to clipboard default" {

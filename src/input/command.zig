@@ -759,10 +759,12 @@ fn actionCommands(action: Action.Key) []const Command {
         // palette context.
         .toggle_command_palette,
         .toggle_quick_terminal,
+        .toggle_selection_endpoint,
         .toggle_visibility,
         .previous_tab,
         .next_tab,
         .last_tab,
+        .start_selection,
         => comptime &.{},
 
         // No commands for obvious reasons

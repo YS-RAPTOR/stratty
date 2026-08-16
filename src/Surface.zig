@@ -5676,6 +5676,27 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .io => self.queueIo(.{ .crash = {} }, .unlocked),
         },
 
+        .start_selection => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const cursor_pin = screen.cursor.page_pin.*;
+            try screen.select(terminal.Selection.init(cursor_pin, cursor_pin, false));
+            try self.queueRender();
+        },
+
+        .toggle_selection_endpoint => {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+
+            const screen: *terminal.Screen = self.io.terminal.screens.active;
+            const sel = if (screen.selection) |*sel| sel else return false;
+            sel.toggleEndpoint();
+            screen.dirty.selection = true;
+            try self.queueRender();
+        },
+
         .adjust_selection => |direction| {
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());

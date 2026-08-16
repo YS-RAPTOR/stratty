@@ -409,6 +409,16 @@ pub const Adjustment = lib.Enum(lib.target, &.{
     "end_of_line",
 });
 
+/// Swap the selection anchor and adjustable endpoint without changing the
+/// selected region.
+pub fn toggleEndpoint(self: *Selection) void {
+    const start_pin = self.startPtr();
+    const end_pin = self.endPtr();
+    const previous_start = start_pin.*;
+    start_pin.* = end_pin.*;
+    end_pin.* = previous_start;
+}
+
 /// Adjust the selection by some given adjustment. An adjustment allows
 /// a selection to be expanded slightly left, right, up, down, etc.
 pub fn adjust(
@@ -508,6 +518,29 @@ pub fn adjust(
 
         .end_of_line => end_pin.x = end_pin.node.cols() - 1,
     }
+}
+
+test "Selection: toggle endpoint" {
+    const testing = std.testing;
+
+    var s = try Screen.init(testing.io, testing.allocator, .{
+        .cols = 10,
+        .rows = 10,
+        .max_scrollback_bytes = 0,
+    });
+    defer s.deinit();
+
+    const original_start = s.pages.pin(.{ .screen = .{ .x = 1, .y = 1 } }).?;
+    const original_end = s.pages.pin(.{ .screen = .{ .x = 3, .y = 4 } }).?;
+    var sel = Selection.init(original_start, original_end, false);
+
+    sel.toggleEndpoint();
+    try testing.expect(sel.start().eql(original_end));
+    try testing.expect(sel.end().eql(original_start));
+
+    sel.toggleEndpoint();
+    try testing.expect(sel.start().eql(original_start));
+    try testing.expect(sel.end().eql(original_end));
 }
 
 test "Selection: adjust right" {
