@@ -184,7 +184,6 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         .SetKeyLabel,
         .SetMark,
         .SetProfile,
-        .SetUserVar,
         .ShellIntegrationVersion,
         .StealFocus,
         .UnicodeVersion,
@@ -193,8 +192,64 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
             parser.command = .invalid;
             return null;
         },
+
+        .SetUserVar => {
+            const value = value_ orelse {
+                parser.command = .invalid;
+                return null;
+            };
+            const prefix = "STRATTY_AGENT_STATE=";
+            if (!std.mem.startsWith(u8, value, prefix)) {
+                log.debug("unimplemented OSC 1337 SetUserVar: {s}", .{value});
+                parser.command = .invalid;
+                return null;
+            }
+
+            const encoded = value[prefix.len..];
+            const state = if (std.mem.eql(u8, encoded, "aWRsZQ=="))
+                "idle"
+            else if (std.mem.eql(u8, encoded, "cnVubmluZw=="))
+                "running"
+            else {
+                parser.command = .invalid;
+                return null;
+            };
+            parser.command = .{ .semantic_prompt = .{
+                .action = .new_command,
+                .options_unvalidated = if (state[0] == 'i')
+                    "stratty_agent_state=idle"
+                else
+                    "stratty_agent_state=running",
+            } };
+            return &parser.command;
+        },
     }
     return &parser.command;
+}
+
+test "OSC: 1337: Stratty agent state user variable" {
+    const testing = std.testing;
+
+    for ([_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "1337;SetUserVar=STRATTY_AGENT_STATE=aWRsZQ==", .expected = "stratty_agent_state=idle" },
+        .{ .input = "1337;SetUserVar=STRATTY_AGENT_STATE=cnVubmluZw==", .expected = "stratty_agent_state=running" },
+    }) |case| {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        for (case.input) |ch| p.next(ch);
+        const command = p.end('\x1b').?.*;
+        try testing.expect(command == .semantic_prompt);
+        try testing.expectEqual(.new_command, command.semantic_prompt.action);
+        try testing.expectEqualStrings(case.expected, command.semantic_prompt.options_unvalidated);
+    }
+}
+
+test "OSC: 1337: unrelated user variables remain ignored" {
+    const testing = std.testing;
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+    for ("1337;SetUserVar=OTHER=aWRsZQ==") |ch| p.next(ch);
+    try testing.expect(p.end('\x1b') == null);
 }
 
 test "OSC: 1337: test valid unimplemented key with no value" {

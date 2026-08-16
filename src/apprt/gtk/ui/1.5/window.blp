@@ -89,7 +89,9 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         autohide: bind template.tabs-autohide;
         expand-tabs: bind template.tabs-wide;
         view: tab_view;
-        visible: bind template.tabs-visible;
+        // Stratty replaces the horizontal tab presentation with the
+        // right-side list below while retaining Adw.TabView as authority.
+        visible: false;
 
         [start]
         Gtk.Box {
@@ -151,23 +153,55 @@ template $GhosttyWindow: Adw.ApplicationWindow {
       }
 
       Box {
-        orientation: vertical;
+        orientation: horizontal;
 
-        $GhosttyDebugWarning {
-          visible: bind template.debug;
+        Box {
+          orientation: vertical;
+          hexpand: true;
+
+          $GhosttyDebugWarning {
+            visible: bind template.debug;
+          }
+
+          Adw.ToastOverlay toast_overlay {
+            Adw.TabView tab_view {
+              notify::n-pages => $notify_n_pages();
+              notify::selected-page => $notify_selected_page();
+              close-page => $close_page();
+              page-attached => $page_attached();
+              page-detached => $page_detached();
+              page-reordered => $page_reordered();
+              create-window => $tab_create_window();
+              setup-menu => $setup_tab_menu();
+              menu-model: tab_context_menu;
+              shortcuts: none;
+            }
+          }
         }
 
-        Adw.ToastOverlay toast_overlay {
-          Adw.TabView tab_view {
-            notify::n-pages => $notify_n_pages();
-            notify::selected-page => $notify_selected_page();
-            close-page => $close_page();
-            page-attached => $page_attached();
-            page-detached => $page_detached();
-            create-window => $tab_create_window();
-            setup-menu => $setup_tab_menu();
-            menu-model: tab_context_menu;
-            shortcuts: none;
+        Gtk.Overlay stratty_sidebar {
+          // Runtime sizing preserves the prototype's 236:1380 ratio.
+          width-request: 210;
+          styles [
+            "stratty-sidebar",
+          ]
+
+          Gtk.DrawingArea stratty_sidebar_backdrop {}
+
+          [overlay]
+          Gtk.ScrolledWindow {
+            hexpand: true;
+            vexpand: true;
+            hscrollbar-policy: never;
+            vscrollbar-policy: automatic;
+            styles [
+              "stratty-sidebar-scroll",
+            ]
+
+            Gtk.ListBox stratty_tab_list {
+              row-selected => $stratty_tab_selected();
+              selection-mode: single;
+            }
           }
         }
       }

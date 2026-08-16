@@ -357,6 +357,12 @@ pub const Action = union(Key) {
     /// Move a tab to a new window.
     move_tab_to_new_window,
 
+    /// Fish shell lifecycle metadata used by Stratty's contextual tabs.
+    shell_lifecycle: ShellLifecycle,
+
+    /// Focus or create a contextual Stratty role tab in the current window.
+    contextual_tab: ContextualTabRole,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -428,6 +434,10 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         move_tab_to_new_window,
+
+        // Stratty downstream actions are appended to preserve upstream ABI.
+        shell_lifecycle,
+        contextual_tab,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -987,6 +997,48 @@ pub const CloseTabMode = enum(c_int) {
 
     test "ghostty.h CloseTabMode" {
         try lib.checkGhosttyHEnum(CloseTabMode, "GHOSTTY_ACTION_CLOSE_TAB_MODE_");
+    }
+};
+
+pub const ContextualTabRole = enum(c_int) {
+    shell,
+    editor,
+    agent,
+
+    test "ghostty.h ContextualTabRole" {
+        try lib.checkGhosttyHEnum(ContextualTabRole, "GHOSTTY_ACTION_CONTEXTUAL_TAB_ROLE_");
+    }
+};
+
+pub const ShellLifecycle = struct {
+    kind: Kind,
+    report: []const u8,
+
+    pub const Kind = enum(c_int) {
+        prompt_ready,
+        command_started,
+        command_ended,
+        agent_idle,
+        agent_running,
+
+        test "ghostty.h ShellLifecycle.Kind" {
+            try lib.checkGhosttyHEnum(Kind, "GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_");
+        }
+    };
+
+    /// sync with ghostty_action_shell_lifecycle_s in ghostty.h
+    pub const C = extern struct {
+        kind: Kind,
+        report: [*]const u8,
+        len: usize,
+    };
+
+    pub fn cval(self: ShellLifecycle) C {
+        return .{
+            .kind = self.kind,
+            .report = self.report.ptr,
+            .len = self.report.len,
+        };
     }
 };
 

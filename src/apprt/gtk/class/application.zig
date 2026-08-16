@@ -46,6 +46,7 @@ const ConfigErrorsDialog = @import("config_errors_dialog.zig").ConfigErrorsDialo
 const GlobalShortcuts = @import("global_shortcuts.zig").GlobalShortcuts;
 const OpenURI = @import("../portal.zig").OpenURI;
 const media = @import("../media.zig");
+const StrattySidebar = @import("../stratty/sidebar.zig");
 
 const log = std.log.scoped(.gtk_ghostty_application);
 
@@ -730,6 +731,8 @@ pub const Application = extern struct {
 
             .new_tab => return Action.newTab(target, .none),
 
+            .contextual_tab => return Action.contextualTab(target, value),
+
             .new_window => try Action.newWindow(
                 self,
                 switch (target) {
@@ -787,6 +790,8 @@ pub const Application = extern struct {
             .toggle_split_zoom => return Action.toggleSplitZoom(target),
             .show_on_screen_keyboard => return Action.showOnScreenKeyboard(target),
             .command_finished => return Action.commandFinished(target, value),
+            .shell_lifecycle => return Action.shellLifecycle(target, value),
+            .cell_size => return Action.cellSize(target),
             .readonly => return Action.setReadonly(target, value),
 
             .start_search => Action.startSearch(target, value),
@@ -800,7 +805,6 @@ pub const Application = extern struct {
             .float_window,
             .toggle_visibility,
             .toggle_background_opacity,
-            .cell_size,
             .render_inspector,
             .renderer_health,
             .color_change,
@@ -898,6 +902,7 @@ pub const Application = extern struct {
         // Load standard css first as it can override some of the user configured styling.
         try loadRuntimeCss414(config, writer);
         try loadRuntimeCss416(config, writer);
+        try StrattySidebar.writeCss(config, writer);
 
         const unfocused_fill: CoreConfig.Color = config.@"unfocused-split-fill" orelse config.background;
 
@@ -2249,6 +2254,16 @@ const Action = struct {
         }
     }
 
+    pub fn cellSize(target: apprt.Target) bool {
+        const surface = switch (target) {
+            .app => return false,
+            .surface => |core| core.rt_surface.gobj(),
+        };
+        const window = ext.getAncestor(Window, surface.as(gtk.Widget)) orelse return false;
+        window.scheduleStrattySidebarWidth();
+        return true;
+    }
+
     pub fn copyTitleToClipboard(target: apprt.Target) bool {
         return switch (target) {
             .app => false,
@@ -3264,6 +3279,24 @@ const Action = struct {
         }
     }
 
+    pub fn contextualTab(target: apprt.Target, role: apprt.action.ContextualTabRole) bool {
+        switch (target) {
+            .app => return false,
+            .surface => |core| {
+                const surface = core.rt_surface.gobj();
+                const window = ext.getAncestor(
+                    Window,
+                    surface.as(gtk.Widget),
+                ) orelse return false;
+                return window.focusContextualRole(surface, switch (role) {
+                    .shell => .shell,
+                    .editor => .editor,
+                    .agent => .agent,
+                });
+            },
+        }
+    }
+
     pub fn toggleTabOverview(target: apprt.Target) bool {
         switch (target) {
             .app => return false,
@@ -3325,6 +3358,20 @@ const Action = struct {
             .app => return false,
             .surface => |surface| {
                 return surface.rt_surface.gobj().commandFinished(value);
+            },
+        }
+    }
+
+    pub fn shellLifecycle(target: apprt.Target, value: apprt.Action.Value(.shell_lifecycle)) bool {
+        switch (target) {
+            .app => return false,
+            .surface => |core| {
+                const surface = core.rt_surface.gobj();
+                const window = ext.getAncestor(
+                    Window,
+                    surface.as(gtk.Widget),
+                ) orelse return false;
+                return window.strattyShellLifecycle(surface, value);
             },
         }
     }

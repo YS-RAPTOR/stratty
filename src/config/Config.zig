@@ -1999,7 +1999,10 @@ keybind: Keybinds = .{},
 /// left padding to 2 and the right padding to 4. If you want to set both
 /// paddings to the same value, you can use a single value. For example,
 /// `window-padding-x = 2` will set both paddings to 2.
-@"window-padding-x": WindowPadding = .{ .top_left = 2, .bottom_right = 2 },
+///
+/// Stratty keeps the normal left inset by default but gives the shared right
+/// edge to its sidebar, so that edge has no explicit terminal padding.
+@"window-padding-x": WindowPadding = .{ .top_left = 2, .bottom_right = 0 },
 
 /// Vertical window padding. This applies padding between the terminal cells and
 /// the top and bottom window borders. The value is in points, meaning that it
@@ -3757,6 +3760,16 @@ else
 ///
 /// Available since 1.4.0.
 @"gtk-horizontal-tab-scroll": bool = true,
+
+/// Override the icon shown for editor tabs in Stratty's sidebar. The bundled
+/// Neovim icon is used when this is unset or the configured file is missing.
+/// Paths are expanded relative to the configuration file.
+@"stratty-editor-icon": ?Path = null,
+
+/// Override the icon shown for agent tabs in Stratty's sidebar. The bundled Pi
+/// icon is used when this is unset or the configured file is missing. Paths are
+/// expanded relative to the configuration file.
+@"stratty-agent-icon": ?Path = null,
 
 /// Custom CSS files to be loaded.
 ///
@@ -6708,6 +6721,30 @@ pub const Keybinds = struct {
                 .{ .key = .{ .unicode = 't' }, .mods = .{ .ctrl = true, .shift = true } },
                 .{ .new_tab = {} },
             );
+
+            // Stratty direct contextual role actions. These intentionally
+            // replace Ghostty's Ctrl+, open-config default on GTK/Linux.
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = ',' }, .mods = .{ .ctrl = true } },
+                .{ .focus_contextual_tab = .shell },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = '.' }, .mods = .{ .ctrl = true } },
+                .{ .focus_contextual_tab = .agent },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = '/' }, .mods = .{ .ctrl = true } },
+                .{ .focus_contextual_tab = .editor },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = ',' }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .open_config = .default },
+            );
+
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'w' }, .mods = .{ .ctrl = true, .shift = true } },
@@ -6737,78 +6774,8 @@ pub const Keybinds = struct {
                 .{ .next_tab = {} },
                 .{ .performable = true },
             );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'o' }, .mods = .{ .ctrl = true, .shift = true } },
-                .{ .new_split = .right },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .unicode = 'e' }, .mods = .{ .ctrl = true, .shift = true } },
-                .{ .new_split = .down },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .unicode = '[' }, .mods = .{ .ctrl = true, .super = true } },
-                .{ .goto_split = .previous },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .unicode = ']' }, .mods = .{ .ctrl = true, .super = true } },
-                .{ .goto_split = .next },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .ctrl = true, .alt = true } },
-                .{ .goto_split = .up },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .ctrl = true, .alt = true } },
-                .{ .goto_split = .down },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } },
-                .{ .goto_split = .left },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .ctrl = true, .alt = true } },
-                .{ .goto_split = .right },
-                .{ .performable = true },
-            );
-
-            // Resizing splits
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .up, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .down, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .left, 10 } },
-                .{ .performable = true },
-            );
-            try self.set.putFlags(
-                alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .super = true, .ctrl = true, .shift = true } },
-                .{ .resize_split = .{ .right, 10 } },
-                .{ .performable = true },
-            );
+            // Stratty intentionally has no default split creation,
+            // navigation, or resize keybindings.
 
             // Viewport scrolling
             try self.set.put(

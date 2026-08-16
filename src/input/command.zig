@@ -607,6 +607,24 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = i18n.N_("Close the current terminal."),
         }},
 
+        .focus_contextual_tab => comptime &.{
+            .{
+                .action = .{ .focus_contextual_tab = .shell },
+                .title = i18n.N_("Focus Contextual Shell"),
+                .description = i18n.N_("Focus or create the contextual shell tab."),
+            },
+            .{
+                .action = .{ .focus_contextual_tab = .editor },
+                .title = i18n.N_("Focus Contextual Editor"),
+                .description = i18n.N_("Focus or create the contextual editor tab."),
+            },
+            .{
+                .action = .{ .focus_contextual_tab = .agent },
+                .title = i18n.N_("Focus Contextual Agent"),
+                .description = i18n.N_("Focus or create the contextual agent tab."),
+            },
+        },
+
         .close_tab => comptime &.{
             .{
                 .action = .{ .close_tab = .this },

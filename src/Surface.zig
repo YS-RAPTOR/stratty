@@ -1138,11 +1138,47 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             try self.selectionScrollTick();
         },
 
-        .start_command => {
+        .agent_status => |status| {
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .shell_lifecycle,
+                .{
+                    .kind = switch (status) {
+                        .idle => .agent_idle,
+                        .running => .agent_running,
+                    },
+                    .report = "",
+                },
+            );
+        },
+
+        .prompt_ready => |report| {
+            defer report.deinit();
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .shell_lifecycle,
+                .{ .kind = .prompt_ready, .report = report.slice() },
+            );
+        },
+
+        .start_command => |report| {
+            defer report.deinit();
             self.command_timer = .now(global.io(), .awake);
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .shell_lifecycle,
+                .{ .kind = .command_started, .report = report.slice() },
+            );
         },
 
         .stop_command => |v| timer: {
+            defer v.report.deinit();
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .shell_lifecycle,
+                .{ .kind = .command_ended, .report = v.report.slice() },
+            );
+
             const end: std.Io.Timestamp = .now(global.io(), .awake);
             const start = self.command_timer orelse break :timer;
             self.command_timer = null;
@@ -1161,7 +1197,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .surface = self },
                 .command_finished,
                 .{
-                    .exit_code = v,
+                    .exit_code = v.exit_code,
                     .duration = duration,
                 },
             ) catch |err| {
@@ -5322,6 +5358,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .{ .surface = self },
             .new_tab,
             {},
+        ),
+
+        .focus_contextual_tab => |role| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .contextual_tab,
+            switch (role) {
+                .shell => .shell,
+                .editor => .editor,
+                .agent => .agent,
+            },
         ),
 
         .close_tab => |v| return try self.rt_app.performAction(

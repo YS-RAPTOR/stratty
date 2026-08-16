@@ -559,6 +559,9 @@ pub const Action = union(enum) {
     /// Open a new tab.
     new_tab,
 
+    /// Focus or create a Stratty role tab in the current window.
+    focus_contextual_tab: ContextualTabRole,
+
     /// Go to the previous tab.
     previous_tab,
 
@@ -1200,6 +1203,12 @@ pub const Action = union(enum) {
         hide,
     };
 
+    pub const ContextualTabRole = enum {
+        shell,
+        editor,
+        agent,
+    };
+
     pub const CloseTabMode = enum {
         this,
         other,
@@ -1447,6 +1456,7 @@ pub const Action = union(enum) {
             // come from. For example `new_window` needs to be sourced to
             // a surface so inheritance can be done correctly.
             .new_tab,
+            .focus_contextual_tab,
             .previous_tab,
             .next_tab,
             .last_tab,

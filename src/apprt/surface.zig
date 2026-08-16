@@ -10,6 +10,11 @@ const terminal = @import("../terminal/main.zig");
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
 
+pub const AgentStatus = enum {
+    idle,
+    running,
+};
+
 /// The message types that can be sent to a single surface.
 pub const Message = union(enum) {
     /// Represents a write request. Magic number comes from the max size
@@ -91,13 +96,23 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
-    /// A command has started in the shell, start a timer.
-    start_command,
+    /// An agent reported whether it is working or waiting for input.
+    agent_status: AgentStatus,
 
-    /// A command has finished in the shell, stop the timer and send out
-    /// notifications as appropriate. The optional u8 is the exit code
-    /// of the command.
-    stop_command: ?u8,
+    /// Fish reached an interactive prompt. The report contains raw OSC 133
+    /// options and is owned by the receiver.
+    prompt_ready: WriteReq,
+
+    /// A command has started in the shell. The report contains raw OSC 133
+    /// options and is owned by the receiver.
+    start_command: WriteReq,
+
+    /// A command has finished in the shell. The report contains raw OSC 133
+    /// options and is owned by the receiver.
+    stop_command: struct {
+        exit_code: ?u8,
+        report: WriteReq,
+    },
 
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,

@@ -29,6 +29,7 @@ const Tab = @import("tab.zig").Tab;
 const DebugWarning = @import("debug_warning.zig").DebugWarning;
 const CommandPalette = @import("command_palette.zig").CommandPalette;
 const WeakRef = @import("../weak_ref.zig").WeakRef;
+const Stratty = @import("../stratty.zig");
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
 
 const log = std.log.scoped(.gtk_ghostty_window);
@@ -276,10 +277,21 @@ pub const Window = extern struct {
         /// The manually overridden title.
         title_override: ?[:0]const u8 = null,
 
+        /// Isolated downstream contextual tab policy and GTK adapter.
+        stratty: ?*Stratty.Adapter = null,
+
+        /// Debounced cell-aligned sidebar sizing. GTK allocations must settle
+        /// before surface and sidebar widths can be compared reliably.
+        stratty_sidebar_width_source: ?c_uint = null,
+        stratty_sidebar_width_request: c_int = 210,
+
         // Template bindings
         tab_overview: *adw.TabOverview,
         tab_bar: *adw.TabBar,
         tab_view: *adw.TabView,
+        stratty_sidebar: *gtk.Overlay,
+        stratty_sidebar_backdrop: *gtk.DrawingArea,
+        stratty_tab_list: *gtk.ListBox,
         toolbar: *adw.ToolbarView,
         toast_overlay: *adw.ToastOverlay,
 
@@ -344,6 +356,19 @@ pub const Window = extern struct {
 
         // Initialize our actions
         self.initActionMap();
+
+        const alloc = Application.default().allocator();
+        if (alloc.create(Stratty.Adapter)) |adapter| {
+            if (Stratty.Adapter.init(alloc, self)) |value| {
+                adapter.* = value;
+                priv.stratty = adapter;
+            } else |err| {
+                log.warn("unable to initialize Stratty controller error={}", .{err});
+                alloc.destroy(adapter);
+            }
+        } else |err| {
+            log.warn("unable to allocate Stratty controller error={}", .{err});
+        }
 
         // Start states based on config.
         if (config.maximize) self.as(gtk.Window).maximize();
@@ -737,6 +762,7 @@ pub const Window = extern struct {
 
         // Remainder uses the config
         const config = if (priv.config) |v| v.get() else return;
+        Stratty.Sidebar.configureBackdrop(priv.stratty_sidebar_backdrop, config);
 
         // Only add a solid background if we're opaque.
         self.toggleCssClass(
@@ -828,6 +854,7 @@ pub const Window = extern struct {
         var it = tree.iterator();
         while (it.next()) |entry| {
             const surface = entry.view;
+            if (priv.stratty) |adapter| adapter.surfaceAttached(surface, null);
             // Before adding any new signal handlers, disconnect any that we may
             // have added before. Otherwise we may get multiple handlers for the
             // same signal.
@@ -875,6 +902,13 @@ pub const Window = extern struct {
                 surfaceToggleMaximize,
                 self,
                 .{},
+            );
+            _ = gobject.Object.signals.notify.connect(
+                surface.as(gobject.Object),
+                *Self,
+                strattySurfacePwd,
+                self,
+                .{ .detail = "pwd" },
             );
 
             // If we've never had a surface initialize yet, then we register
@@ -959,6 +993,41 @@ pub const Window = extern struct {
     /// This does not ref the value.
     pub fn getActiveSurface(self: *Self) ?*Surface {
         const tab = self.getSelectedTab() orelse return null;
+        return tab.getActiveSurface();
+    }
+
+    /// Apply a Stratty direct-role action in this window only.
+    pub fn focusContextualRole(self: *Self, source: *Surface, role: Stratty.Role) bool {
+        const adapter = self.private().stratty orelse return false;
+        return adapter.requestRole(self, source, role);
+    }
+
+    /// Receive Fish lifecycle metadata for a surface in this window.
+    pub fn strattyShellLifecycle(
+        self: *Self,
+        surface: *Surface,
+        value: apprt.action.ShellLifecycle,
+    ) bool {
+        const adapter = self.private().stratty orelse return false;
+        return adapter.shellLifecycle(surface, value);
+    }
+
+    /// Focus a native surface's containing tab without cycling.
+    pub fn focusSurface(self: *Self, surface: *Surface) void {
+        const tab = ext.getAncestor(Tab, surface.as(gtk.Widget)) orelse return;
+        const page = self.private().tab_view.getPage(tab.as(gtk.Widget));
+        self.private().tab_view.setSelectedPage(page);
+        surface.grabFocus();
+    }
+
+    /// Create a native interactive tab at an exact working directory.
+    pub fn newContextualTab(self: *Self, cwd: [:0]const u8) ?*Surface {
+        const page = self.newTabPage(
+            if (self.getActiveSurface()) |surface| surface.core() else null,
+            .tab,
+            .{ .working_directory = cwd },
+        );
+        const tab = gobject.ext.cast(Tab, page.getChild()) orelse return null;
         return tab.getActiveSurface();
     }
 
@@ -1072,8 +1141,9 @@ pub const Window = extern struct {
         }
 
         return switch (config.@"gtk-titlebar-style") {
-            // If the titlebar style is tabs never show the titlebar.
-            .tabs => false,
+            // Stratty hides the horizontal tab bar, so retain the native
+            // header controls even when an inherited config requested tabs.
+            .tabs => true,
 
             // If the titlebar style is native show the titlebar if configured
             // to do so.
@@ -1161,6 +1231,7 @@ pub const Window = extern struct {
         }
 
         self.syncAppearance();
+        self.rebuildStrattyTabList();
     }
 
     fn propIsActive(
@@ -1203,6 +1274,8 @@ pub const Window = extern struct {
         _: *gobject.ParamSpec,
         self: *Self,
     ) callconv(.c) void {
+        self.scheduleStrattySidebarWidth();
+
         // X11 needs to fix blurring on resize, but winproto implementations
         // could do anything.
         self.private().winproto.resizeEvent() catch |err| {
@@ -1211,6 +1284,90 @@ pub const Window = extern struct {
                 .{err},
             );
         };
+    }
+
+    pub fn scheduleStrattySidebarWidth(self: *Self) void {
+        const priv = self.private();
+        if (priv.stratty_sidebar_width_source != null) return;
+        priv.stratty_sidebar_width_source = glib.idleAdd(
+            syncStrattySidebarWidthIdle,
+            self,
+        );
+    }
+
+    fn syncStrattySidebarWidthIdle(userdata: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(userdata orelse return 0));
+        self.private().stratty_sidebar_width_source = null;
+        self.syncStrattySidebarWidth();
+        return 0;
+    }
+
+    fn syncStrattySidebarWidth(self: *Self) void {
+        const priv = self.private();
+        const gdk_surface = self.as(gtk.Native).getSurface() orelse return;
+        const window_width = gdk_surface.getWidth();
+        if (window_width <= 0) return;
+
+        // The accepted prototype is 1380 px wide with a 236 px sidebar.
+        // Preserve that ratio while retaining its compact-layout bounds.
+        const proportional = std.math.clamp(
+            @divTrunc(@as(i64, window_width) * 236 + 690, 1380),
+            210,
+            320,
+        );
+        var width = proportional;
+
+        // GTK allocates the sidebar in logical pixels while Ghostty's GL
+        // surface, cell metrics, and padding are buffer pixels. Convert every
+        // candidate through GTK's integer buffer scale before comparing it to
+        // the cell grid. The live surface plus the currently allocated sidebar
+        // gives the exact horizontal content width; the observed difference
+        // between the sidebar request and allocation accounts for fixed GTK
+        // border or internal chrome without creating a resize feedback loop.
+        snap: {
+            const active = self.getActiveSurface() orelse break :snap;
+            const core = active.core() orelse break :snap;
+            const cell_width = core.size.cell.width;
+            if (cell_width == 0) break :snap;
+
+            const gtk_scale: i64 = @max(
+                active.as(gtk.Widget).getScaleFactor(),
+                1,
+            );
+            const active_width: i64 = @intCast(active.getSize().width);
+            const sidebar_width: i64 = priv.stratty_sidebar.as(gtk.Widget).getWidth();
+            if (active_width <= 0 or sidebar_width <= 0) break :snap;
+            const available_width = active_width + sidebar_width * gtk_scale;
+            const allocation_offset = sidebar_width -
+                @as(i64, priv.stratty_sidebar_width_request);
+            const padding: i64 = @intCast(
+                core.size.padding.left + core.size.padding.right,
+            );
+
+            var best_distance: i64 = std.math.maxInt(i64);
+            var candidate: i64 = 210;
+            while (candidate <= 320) : (candidate += 1) {
+                const candidate_allocation = candidate + allocation_offset;
+                if (candidate_allocation <= 0) continue;
+                const terminal_width = available_width -
+                    candidate_allocation * gtk_scale - padding;
+                if (terminal_width <= 0) continue;
+                if (@mod(terminal_width, @as(i64, cell_width)) != 0) continue;
+
+                const distance = if (candidate >= proportional)
+                    candidate - proportional
+                else
+                    proportional - candidate;
+                if (distance >= best_distance) continue;
+                best_distance = distance;
+                width = candidate;
+            }
+        }
+
+        const requested: c_int = @intCast(width);
+        if (priv.stratty_sidebar_width_request == requested) return;
+        priv.stratty_sidebar_width_request = requested;
+        priv.stratty_sidebar.as(gtk.Widget).setSizeRequest(requested, -1);
     }
 
     fn toplevelComputeSize(
@@ -1302,6 +1459,8 @@ pub const Window = extern struct {
         _: *gobject.ParamSpec,
         self: *Self,
     ) callconv(.c) void {
+        self.scheduleStrattySidebarWidth();
+
         // On some platforms (namely X11) we need to refresh our appearance when
         // the scale factor changes. In theory this could be more fine-grained as
         // a full refresh could be expensive, but a) this *should* be rare, and
@@ -1403,6 +1562,10 @@ pub const Window = extern struct {
             }
             priv.handle_active_state_source = null;
         }
+        if (priv.stratty_sidebar_width_source) |source| {
+            _ = glib.Source.remove(source);
+            priv.stratty_sidebar_width_source = null;
+        }
 
         priv.command_palette.deinit();
 
@@ -1412,6 +1575,12 @@ pub const Window = extern struct {
         }
 
         priv.tab_bindings.setSource(null);
+
+        if (priv.stratty) |adapter| {
+            adapter.deinit();
+            Application.default().allocator().destroy(adapter);
+            priv.stratty = null;
+        }
 
         gtk.Widget.disposeTemplate(
             self.as(gtk.Widget),
@@ -1481,6 +1650,7 @@ pub const Window = extern struct {
                     .{ .after = true },
                 );
             }
+            self.scheduleStrattySidebarWidth();
         }
 
         // Notify every displayed surface when the compositor changes the
@@ -1687,6 +1857,14 @@ pub const Window = extern struct {
         // are synced from the active tab.
         priv.tab_bindings.setSource(child.as(gobject.Object));
 
+        if (priv.stratty) |adapter| {
+            const tab = gobject.ext.cast(Tab, child).?;
+            if (tab.getActiveSurface()) |surface| adapter.selected(surface);
+        }
+
+        self.syncStrattyTabSelection();
+        self.scheduleStrattySidebarWidth();
+
         // If the tab was previously marked as needing attention
         // (e.g. due to a bell character), we now unmark that
         page.setNeedsAttention(@intFromBool(false));
@@ -1709,6 +1887,13 @@ pub const Window = extern struct {
             tabCloseRequest,
             self,
             .{},
+        );
+        _ = gobject.Object.signals.notify.connect(
+            page.as(gobject.Object),
+            *Self,
+            strattyNeedsAttention,
+            self,
+            .{ .detail = "needs-attention" },
         );
 
         // Attach listeners for the surface.
@@ -1733,6 +1918,7 @@ pub const Window = extern struct {
         if (tab.getSurfaceTree()) |tree| {
             self.connectSurfaceHandlers(tree);
         }
+        self.rebuildStrattyTabList();
     }
 
     fn tabViewPageDetached(
@@ -1753,11 +1939,108 @@ pub const Window = extern struct {
             null,
             self,
         );
+        _ = gobject.signalHandlersDisconnectMatched(
+            page.as(gobject.Object),
+            .{ .data = true },
+            0,
+            0,
+            null,
+            null,
+            self,
+        );
 
-        // Remove the tree handlers
+        // Remove the tree handlers and downstream surface state.
         if (tab.getSurfaceTree()) |tree| {
+            if (self.private().stratty) |adapter| {
+                var it = tree.iterator();
+                while (it.next()) |entry| adapter.surfaceDetached(entry.view);
+            }
             self.disconnectSurfaceHandlers(tree);
         }
+        self.rebuildStrattyTabList();
+    }
+
+    fn tabViewPageReordered(
+        _: *adw.TabView,
+        _: *adw.TabPage,
+        _: c_int,
+        self: *Self,
+    ) callconv(.c) void {
+        self.rebuildStrattyTabList();
+    }
+
+    fn strattyTabSelected(
+        _: *gtk.ListBox,
+        row: ?*gtk.ListBoxRow,
+        self: *Self,
+    ) callconv(.c) void {
+        const selected = row orelse return;
+        const index = Stratty.Sidebar.pageIndexForRow(
+            self.private().stratty_tab_list,
+            selected,
+        ) orelse return;
+        if (index < 0 or index >= self.private().tab_view.getNPages()) return;
+        const page = self.private().tab_view.getNthPage(index);
+        self.private().tab_view.setSelectedPage(page);
+        if (self.getActiveSurface()) |surface| surface.grabFocus();
+    }
+
+    pub fn rebuildStrattyTabList(self: *Self) void {
+        const priv = self.private();
+        const adapter = priv.stratty orelse return;
+        const config_object = priv.config orelse return;
+        const config = config_object.get();
+        const widget = priv.stratty_tab_list.as(gtk.Widget);
+        while (widget.getFirstChild()) |child| priv.stratty_tab_list.remove(child);
+
+        const allocator = Application.default().allocator();
+
+        var previous_workspace: ?[]const u8 = null;
+        const page_count = priv.tab_view.getNPages();
+        var index: c_int = 0;
+        while (index < page_count) : (index += 1) {
+            const page = priv.tab_view.getNthPage(index);
+            const tab = gobject.ext.cast(Tab, page.getChild()) orelse continue;
+            const surface = tab.getActiveSurface() orelse continue;
+            const presentation = adapter.presentation(surface) orelse continue;
+            if (previous_workspace == null or !std.mem.eql(
+                u8,
+                previous_workspace.?,
+                presentation.workspace,
+            )) {
+                Stratty.Sidebar.appendHeader(
+                    priv.stratty_tab_list,
+                    allocator,
+                    presentation.workspace,
+                );
+                previous_workspace = presentation.workspace;
+            }
+            Stratty.Sidebar.appendTab(
+                priv.stratty_tab_list,
+                allocator,
+                config,
+                presentation,
+                page.getNeedsAttention() != 0,
+            );
+        }
+        self.syncStrattyTabSelection();
+    }
+
+    fn syncStrattyTabSelection(self: *Self) void {
+        const priv = self.private();
+        const page = priv.tab_view.getSelectedPage() orelse return;
+        const index = priv.tab_view.getPagePosition(page);
+        const row = Stratty.Sidebar.rowForPageIndex(priv.stratty_tab_list, index);
+        priv.stratty_tab_list.selectRow(row);
+        priv.stratty_tab_list.as(gtk.Widget).queueDraw();
+    }
+
+    fn strattyNeedsAttention(
+        _: *gobject.Object,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        self.rebuildStrattyTabList();
     }
 
     fn tabViewCreateWindow(
@@ -1813,6 +2096,15 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         self.private().context_menu_page = page;
+    }
+
+    fn strattySurfacePwd(
+        object: *gobject.Object,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        const surface = gobject.ext.cast(Surface, object) orelse return;
+        if (self.private().stratty) |adapter| adapter.surfacePwdChanged(surface);
     }
 
     fn surfaceClipboardWrite(
@@ -1943,6 +2235,7 @@ pub const Window = extern struct {
                 @intCast(size.height),
             );
         }
+        self.scheduleStrattySidebarWidth();
     }
 
     fn tabSplitTreeChanged(
@@ -1952,12 +2245,33 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         if (old_tree) |tree| {
+            // A surface can disappear because its process exited without the
+            // enclosing Adw tab being detached. Remove only surfaces absent
+            // from the replacement tree so surviving surfaces keep their
+            // immutable Stratty creation sequence.
+            if (self.private().stratty) |adapter| {
+                var iterator = tree.iterator();
+                while (iterator.next()) |entry| {
+                    if (!surfaceTreeContains(new_tree, entry.view)) {
+                        adapter.surfaceDetached(entry.view);
+                    }
+                }
+            }
             self.disconnectSurfaceHandlers(tree);
         }
 
         if (new_tree) |tree| {
             self.connectSurfaceHandlers(tree);
         }
+    }
+
+    fn surfaceTreeContains(tree: ?*const Surface.Tree, surface: *Surface) bool {
+        const value = tree orelse return false;
+        var iterator = value.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.view == surface) return true;
+        }
+        return false;
     }
 
     fn actionAbout(
@@ -2307,6 +2621,9 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("tab_overview", .{});
             class.bindTemplateChildPrivate("tab_bar", .{});
             class.bindTemplateChildPrivate("tab_view", .{});
+            class.bindTemplateChildPrivate("stratty_sidebar", .{});
+            class.bindTemplateChildPrivate("stratty_sidebar_backdrop", .{});
+            class.bindTemplateChildPrivate("stratty_tab_list", .{});
             class.bindTemplateChildPrivate("toolbar", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
 
@@ -2319,6 +2636,8 @@ pub const Window = extern struct {
             class.bindTemplateCallback("close_page", &tabViewClosePage);
             class.bindTemplateCallback("page_attached", &tabViewPageAttached);
             class.bindTemplateCallback("page_detached", &tabViewPageDetached);
+            class.bindTemplateCallback("page_reordered", &tabViewPageReordered);
+            class.bindTemplateCallback("stratty_tab_selected", &strattyTabSelected);
             class.bindTemplateCallback("setup_tab_menu", &setupTabMenu);
             class.bindTemplateCallback("tab_create_window", &tabViewCreateWindow);
             class.bindTemplateCallback("notify_n_pages", &tabViewNPages);

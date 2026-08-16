@@ -871,6 +871,29 @@ typedef struct {
   int8_t progress;
 } ghostty_action_progress_report_s;
 
+// apprt.action.ContextualTabRole
+typedef enum {
+  GHOSTTY_ACTION_CONTEXTUAL_TAB_ROLE_SHELL,
+  GHOSTTY_ACTION_CONTEXTUAL_TAB_ROLE_EDITOR,
+  GHOSTTY_ACTION_CONTEXTUAL_TAB_ROLE_AGENT,
+} ghostty_action_contextual_tab_role_e;
+
+// apprt.action.ShellLifecycle.Kind
+typedef enum {
+  GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_PROMPT_READY,
+  GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_COMMAND_STARTED,
+  GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_COMMAND_ENDED,
+  GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_AGENT_IDLE,
+  GHOSTTY_ACTION_SHELL_LIFECYCLE_KIND_AGENT_RUNNING,
+} ghostty_action_shell_lifecycle_kind_e;
+
+// apprt.action.ShellLifecycle.C
+typedef struct {
+  ghostty_action_shell_lifecycle_kind_e kind;
+  const char* report;
+  uintptr_t len;
+} ghostty_action_shell_lifecycle_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -972,6 +995,8 @@ typedef enum {
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
+  GHOSTTY_ACTION_SHELL_LIFECYCLE,
+  GHOSTTY_ACTION_CONTEXTUAL_TAB,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1010,6 +1035,8 @@ typedef union {
   ghostty_surface_message_childexited_s child_exited;
   ghostty_action_progress_report_s progress_report;
   ghostty_action_command_finished_s command_finished;
+  ghostty_action_shell_lifecycle_s shell_lifecycle;
+  ghostty_action_contextual_tab_role_e contextual_tab;
   ghostty_action_start_search_s start_search;
   ghostty_action_search_total_s search_total;
   ghostty_action_search_selected_s search_selected;

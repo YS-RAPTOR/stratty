@@ -992,9 +992,34 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         cmd: Stream.Action.SemanticPrompt,
     ) !void {
+        if (cmd.action == .new_command) {
+            const prefix = "stratty_agent_state=";
+            if (std.mem.startsWith(u8, cmd.options_unvalidated, prefix)) {
+                const value = cmd.options_unvalidated[prefix.len..];
+                const status: apprt.surface.AgentStatus = if (std.mem.eql(u8, value, "idle"))
+                    .idle
+                else if (std.mem.eql(u8, value, "running"))
+                    .running
+                else
+                    return;
+                self.surfaceMessageWriter(.{ .agent_status = status });
+                return;
+            }
+        }
+
         switch (cmd.action) {
+            .fresh_line_new_prompt => {
+                self.surfaceMessageWriter(.{ .prompt_ready = try apprt.surface.Message.WriteReq.init(
+                    self.alloc,
+                    cmd.options_unvalidated,
+                ) });
+            },
+
             .end_input_start_output => {
-                self.surfaceMessageWriter(.start_command);
+                self.surfaceMessageWriter(.{ .start_command = try apprt.surface.Message.WriteReq.init(
+                    self.alloc,
+                    cmd.options_unvalidated,
+                ) });
             },
 
             .end_command => {
@@ -1006,14 +1031,19 @@ pub const StreamHandler = struct {
                     break :code std.math.cast(u8, raw) orelse 1;
                 };
 
-                self.surfaceMessageWriter(.{ .stop_command = code });
+                self.surfaceMessageWriter(.{ .stop_command = .{
+                    .exit_code = code,
+                    .report = try apprt.surface.Message.WriteReq.init(
+                        self.alloc,
+                        cmd.options_unvalidated,
+                    ),
+                } });
             },
 
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
             .new_command,
             .prompt_start,
             => {},

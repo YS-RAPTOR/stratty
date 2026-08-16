@@ -147,12 +147,21 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
 
     function __ghostty_mark_output_start --on-event fish_preexec
         set --global __ghostty_prompt_state pre-exec
-        echo -en "\e]133;C\a"
+        if functions -q __stratty_mark_output_start
+            __stratty_mark_output_start "$argv[1]"
+        else
+            echo -en "\e]133;C\a"
+        end
     end
 
     function __ghostty_mark_output_end --on-event fish_postexec
+        set --local command_status $status
         set --global __ghostty_prompt_state post-exec
-        echo -en "\e]133;D;$status\a"
+        if functions -q __stratty_mark_output_end
+            __stratty_mark_output_end $command_status
+        else
+            echo -en "\e]133;D;$command_status\a"
+        end
     end
 
     # Report pwd. This is actually built-in to fish but only for terminals
