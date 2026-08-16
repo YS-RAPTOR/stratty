@@ -265,10 +265,7 @@ pub const Controller = struct {
     /// commands are queued only now, after normal Fish and direnv startup.
     pub fn promptReady(self: *Controller, id: SurfaceId) !?[]const u8 {
         const surface = self.getSurface(id) orelse return null;
-        const pending_id = surface.pending_id orelse {
-            try self.setActivity(surface, .shell);
-            return null;
-        };
+        const pending_id = surface.pending_id orelse return null;
         const pending_index = self.pendingIndex(pending_id) orelse return null;
         const pending = &self.pending.items[pending_index];
 
@@ -515,6 +512,18 @@ test "cancelled creation releases its reservation" {
 
     try std.testing.expectEqual(@as(usize, 0), controller.pendingCount());
     try std.testing.expect((try controller.requestRole(.editor)) == .create);
+}
+
+test "prompt markers without a pending target preserve current activity" {
+    var controller = Controller.init(std.testing.allocator);
+    defer controller.deinit();
+
+    try add(&controller, 1, "/repo", "/repo");
+    try controller.commandStarted(1, .{ .role = .agent, .command = "pi" });
+
+    try std.testing.expect((try controller.promptReady(1)) == null);
+    try std.testing.expectEqual(Role.agent, controller.presentation(1).?.role);
+    try std.testing.expectEqualStrings("pi", controller.presentation(1).?.activity);
 }
 
 test "pending command waits for first prompt and does not duplicate queueing" {
