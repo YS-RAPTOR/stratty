@@ -3,6 +3,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const ignored_commands = [_][]const u8{
+    "herdr-context",
+    "oh-my-posh",
+    "MainThread",
+};
+
 pub const Process = struct {
     pid: u64,
     comm: []u8,
@@ -48,6 +54,11 @@ pub fn foregroundGroup(
         errdefer allocator.free(comm);
         const cmdline = commandLine(allocator, io, pid) catch try allocator.dupe(u8, "");
         errdefer allocator.free(cmdline);
+        if (processIsIgnored(comm, cmdline)) {
+            allocator.free(comm);
+            allocator.free(cmdline);
+            continue;
+        }
         const cwd = currentWorkingDirectory(allocator, io, pid) catch try allocator.dupe(u8, "");
         errdefer allocator.free(cwd);
         if (comm.len == 0 and cmdline.len == 0) {
@@ -95,6 +106,25 @@ fn processMatchesCandidate(process: Process, candidate: []const u8) bool {
     var arguments = std.mem.splitScalar(u8, process.cmdline, 0);
     while (arguments.next()) |argument| {
         if (pathMatches(argument, candidate)) return true;
+    }
+    return false;
+}
+
+fn processIsIgnored(comm: []const u8, cmdline: []const u8) bool {
+    if (commandIsIgnored(comm)) return true;
+    var arguments = std.mem.splitScalar(u8, cmdline, 0);
+    return commandIsIgnored(arguments.next() orelse "");
+}
+
+fn commandIsIgnored(raw_command: []const u8) bool {
+    const command = std.fs.path.basename(std.mem.trimStart(
+        u8,
+        std.mem.trim(u8, raw_command, " \t\r\n"),
+        "-",
+    ));
+    for (ignored_commands) |ignored| {
+        if (std.mem.eql(u8, command, ignored) or
+            (command.len == 15 and std.mem.startsWith(u8, ignored, command))) return true;
     }
     return false;
 }
@@ -200,6 +230,13 @@ fn parseProcessGroup(stat: []const u8) !u64 {
 
 test "process names are trimmed" {
     try std.testing.expectEqualStrings("nvim", normalized("nvim\n"));
+}
+
+test "infrastructure and transient thread names are ignored" {
+    try std.testing.expect(processIsIgnored("herdr-context", "herdr-context\x00"));
+    try std.testing.expect(processIsIgnored("oh-my-posh", "/usr/bin/oh-my-posh\x00print\x00"));
+    try std.testing.expect(processIsIgnored("MainThread", "node\x00pi\x00"));
+    try std.testing.expect(!processIsIgnored("node", "node\x00pi\x00"));
 }
 
 test "proc stat parser tolerates spaces and closing parentheses in command" {

@@ -416,7 +416,6 @@ pub fn appendTab(
     copy.as(gtk.Widget).setHexpand(@intFromBool(true));
     copy.as(gtk.Widget).setValign(.center);
     copy.as(gtk.Widget).setVexpand(@intFromBool(false));
-    copy.as(gtk.Widget).addCssClass("stratty-row-copy");
 
     const title_text = allocator.dupeZ(u8, presentation.activity) catch return;
     defer allocator.free(title_text);
@@ -711,9 +710,6 @@ pub fn writeCss(config: *const CoreConfig, writer: *std.Io.Writer) std.Io.Writer
         \\.stratty-role-icon {{
         \\  min-width: 23px;
         \\  min-height: 23px;
-        \\}}
-        \\.stratty-row-copy {{
-        \\  margin-top: 4px;
         \\}}
         \\.stratty-row-title {{
         \\  font-size: 12px;
