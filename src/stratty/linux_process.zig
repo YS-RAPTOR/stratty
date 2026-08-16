@@ -90,7 +90,7 @@ pub fn matchesExecutable(processes: []const Process, executable: []const u8) boo
     return false;
 }
 
-pub fn processMatchesCandidate(process: Process, candidate: []const u8) bool {
+fn processMatchesCandidate(process: Process, candidate: []const u8) bool {
     if (pathMatches(process.comm, candidate)) return true;
     var arguments = std.mem.splitScalar(u8, process.cmdline, 0);
     while (arguments.next()) |argument| {
@@ -99,7 +99,7 @@ pub fn processMatchesCandidate(process: Process, candidate: []const u8) bool {
     return false;
 }
 
-pub fn pathMatches(raw_value: []const u8, raw_candidate: []const u8) bool {
+fn pathMatches(raw_value: []const u8, raw_candidate: []const u8) bool {
     const value = std.mem.trimStart(u8, std.mem.trim(u8, raw_value, " \t\r\n"), "-");
     const candidate = std.fs.path.basename(std.mem.trim(u8, raw_candidate, " \t\r\n"));
     if (value.len == 0 or candidate.len == 0) return false;
@@ -115,7 +115,7 @@ pub fn pathMatches(raw_value: []const u8, raw_candidate: []const u8) bool {
     return false;
 }
 
-pub fn name(
+fn name(
     allocator: std.mem.Allocator,
     io: std.Io,
     pid: u64,
@@ -131,7 +131,7 @@ pub fn name(
     return result;
 }
 
-pub fn commandLine(
+fn commandLine(
     allocator: std.mem.Allocator,
     io: std.Io,
     pid: u64,
@@ -141,7 +141,7 @@ pub fn commandLine(
     return readProcFile(allocator, io, path, 64 * 1024);
 }
 
-pub fn currentWorkingDirectory(
+fn currentWorkingDirectory(
     allocator: std.mem.Allocator,
     io: std.Io,
     pid: u64,
@@ -153,7 +153,7 @@ pub fn currentWorkingDirectory(
     return allocator.dupe(u8, target_buffer[0..count]);
 }
 
-pub fn normalized(raw: []const u8) []const u8 {
+fn normalized(raw: []const u8) []const u8 {
     return std.mem.trim(u8, raw, " \t\r\n");
 }
 

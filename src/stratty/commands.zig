@@ -6,8 +6,8 @@
 const std = @import("std");
 const controller = @import("controller.zig");
 
-pub const editor_environment_variable = "EDITOR";
-pub const agent_environment_variable = "AGENT";
+const editor_environment_variable = "EDITOR";
+const agent_environment_variable = "AGENT";
 
 pub fn fromEnvironment(environment: *const std.process.Environ.Map) controller.Commands {
     return .{
@@ -18,7 +18,7 @@ pub fn fromEnvironment(environment: *const std.process.Environ.Map) controller.C
 
 /// The first implementation intentionally accepts one executable token rather
 /// than evaluating an arbitrary shell fragment. Paths are supported.
-pub fn validCommand(value: ?[]const u8) ?[]const u8 {
+fn validCommand(value: ?[]const u8) ?[]const u8 {
     const command = value orelse return null;
     if (command.len == 0) return null;
     for (command) |byte| switch (byte) {

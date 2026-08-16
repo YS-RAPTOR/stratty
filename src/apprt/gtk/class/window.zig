@@ -357,18 +357,13 @@ pub const Window = extern struct {
         // Initialize our actions
         self.initActionMap();
 
-        const alloc = Application.default().allocator();
-        if (alloc.create(Stratty.Adapter)) |adapter| {
-            if (Stratty.Adapter.init(alloc, self)) |value| {
-                adapter.* = value;
-                priv.stratty = adapter;
-            } else |err| {
-                log.warn("unable to initialize Stratty controller error={}", .{err});
-                alloc.destroy(adapter);
-            }
-        } else |err| {
-            log.warn("unable to allocate Stratty controller error={}", .{err});
-        }
+        priv.stratty = Stratty.Adapter.create(
+            Application.default().allocator(),
+            self,
+        ) catch |err| failed: {
+            log.warn("unable to initialize Stratty controller error={}", .{err});
+            break :failed null;
+        };
 
         // Start states based on config.
         if (config.maximize) self.as(gtk.Window).maximize();
@@ -999,7 +994,7 @@ pub const Window = extern struct {
     /// Apply a Stratty direct-role action in this window only.
     pub fn focusContextualRole(self: *Self, source: *Surface, role: Stratty.Role) bool {
         const adapter = self.private().stratty orelse return false;
-        return adapter.requestRole(self, source, role);
+        return adapter.requestRole(source, role);
     }
 
     /// Receive Fish lifecycle metadata for a surface in this window.
@@ -1308,63 +1303,20 @@ pub const Window = extern struct {
         const window_width = gdk_surface.getWidth();
         if (window_width <= 0) return;
 
-        // The accepted prototype is 1380 px wide with a 236 px sidebar.
-        // Preserve that ratio while retaining its compact-layout bounds.
-        const proportional = std.math.clamp(
-            @divTrunc(@as(i64, window_width) * 236 + 690, 1380),
-            210,
-            320,
-        );
-        var width = proportional;
-
-        // GTK allocates the sidebar in logical pixels while Ghostty's GL
-        // surface, cell metrics, and padding are buffer pixels. Convert every
-        // candidate through GTK's integer buffer scale before comparing it to
-        // the cell grid. The live surface plus the currently allocated sidebar
-        // gives the exact horizontal content width; the observed difference
-        // between the sidebar request and allocation accounts for fixed GTK
-        // border or internal chrome without creating a resize feedback loop.
-        snap: {
-            const active = self.getActiveSurface() orelse break :snap;
-            const core = active.core() orelse break :snap;
-            const cell_width = core.size.cell.width;
-            if (cell_width == 0) break :snap;
-
-            const gtk_scale: i64 = @max(
-                active.as(gtk.Widget).getScaleFactor(),
-                1,
-            );
-            const active_width: i64 = @intCast(active.getSize().width);
-            const sidebar_width: i64 = priv.stratty_sidebar.as(gtk.Widget).getWidth();
-            if (active_width <= 0 or sidebar_width <= 0) break :snap;
-            const available_width = active_width + sidebar_width * gtk_scale;
-            const allocation_offset = sidebar_width -
-                @as(i64, priv.stratty_sidebar_width_request);
-            const padding: i64 = @intCast(
-                core.size.padding.left + core.size.padding.right,
-            );
-
-            var best_distance: i64 = std.math.maxInt(i64);
-            var candidate: i64 = 210;
-            while (candidate <= 320) : (candidate += 1) {
-                const candidate_allocation = candidate + allocation_offset;
-                if (candidate_allocation <= 0) continue;
-                const terminal_width = available_width -
-                    candidate_allocation * gtk_scale - padding;
-                if (terminal_width <= 0) continue;
-                if (@mod(terminal_width, @as(i64, cell_width)) != 0) continue;
-
-                const distance = if (candidate >= proportional)
-                    candidate - proportional
-                else
-                    proportional - candidate;
-                if (distance >= best_distance) continue;
-                best_distance = distance;
-                width = candidate;
-            }
-        }
-
-        const requested: c_int = @intCast(width);
+        const grid: ?Stratty.Sidebar.CellGrid = grid: {
+            const active = self.getActiveSurface() orelse break :grid null;
+            const core = active.core() orelse break :grid null;
+            if (core.size.cell.width == 0) break :grid null;
+            break :grid .{
+                .surface_width = @intCast(active.getSize().width),
+                .sidebar_width = priv.stratty_sidebar.as(gtk.Widget).getWidth(),
+                .previous_request = priv.stratty_sidebar_width_request,
+                .scale = @max(active.as(gtk.Widget).getScaleFactor(), 1),
+                .cell_width = core.size.cell.width,
+                .padding = @intCast(core.size.padding.left + core.size.padding.right),
+            };
+        };
+        const requested = Stratty.Sidebar.widthFor(window_width, grid);
         if (priv.stratty_sidebar_width_request == requested) return;
         priv.stratty_sidebar_width_request = requested;
         priv.stratty_sidebar.as(gtk.Widget).setSizeRequest(requested, -1);
@@ -1577,8 +1529,7 @@ pub const Window = extern struct {
         priv.tab_bindings.setSource(null);
 
         if (priv.stratty) |adapter| {
-            adapter.deinit();
-            Application.default().allocator().destroy(adapter);
+            adapter.destroy();
             priv.stratty = null;
         }
 
@@ -1988,41 +1939,8 @@ pub const Window = extern struct {
     pub fn rebuildStrattyTabList(self: *Self) void {
         const priv = self.private();
         const adapter = priv.stratty orelse return;
-        const config_object = priv.config orelse return;
-        const config = config_object.get();
-        const widget = priv.stratty_tab_list.as(gtk.Widget);
-        while (widget.getFirstChild()) |child| priv.stratty_tab_list.remove(child);
-
-        const allocator = Application.default().allocator();
-
-        var previous_workspace: ?[]const u8 = null;
-        const page_count = priv.tab_view.getNPages();
-        var index: c_int = 0;
-        while (index < page_count) : (index += 1) {
-            const page = priv.tab_view.getNthPage(index);
-            const tab = gobject.ext.cast(Tab, page.getChild()) orelse continue;
-            const surface = tab.getActiveSurface() orelse continue;
-            const presentation = adapter.presentation(surface) orelse continue;
-            if (previous_workspace == null or !std.mem.eql(
-                u8,
-                previous_workspace.?,
-                presentation.workspace,
-            )) {
-                Stratty.Sidebar.appendHeader(
-                    priv.stratty_tab_list,
-                    allocator,
-                    presentation.workspace,
-                );
-                previous_workspace = presentation.workspace;
-            }
-            Stratty.Sidebar.appendTab(
-                priv.stratty_tab_list,
-                allocator,
-                config,
-                presentation,
-                page.getNeedsAttention() != 0,
-            );
-        }
+        const config = (priv.config orelse return).get();
+        adapter.rebuildSidebar(priv.stratty_tab_list, priv.tab_view, config);
         self.syncStrattyTabSelection();
     }
 

@@ -1,13 +1,17 @@
 //! Thin GTK host for the pure Stratty contextual controller.
 
 const std = @import("std");
+const adw = @import("adw");
 const gtk = @import("gtk");
 const glib = @import("glib");
+const gobject = @import("gobject");
 const global = @import("../../../global.zig");
 const apprt = @import("../../../apprt.zig");
+const CoreConfig = @import("../../../config.zig").Config;
 const stratty = @import("../../../stratty.zig");
 
 const ext = @import("../ext.zig");
+const Sidebar = @import("sidebar.zig");
 const Window = @import("../class/window.zig").Window;
 const Surface = @import("../class/surface.zig").Surface;
 const Tab = @import("../class/tab.zig").Tab;
@@ -24,7 +28,20 @@ pub const Adapter = struct {
     foreground_watches: std.ArrayList(ForegroundWatch) = .empty,
     foreground_source: ?c_uint = null,
 
-    pub fn init(allocator: std.mem.Allocator, window: *Window) !Adapter {
+    pub fn create(allocator: std.mem.Allocator, window: *Window) !*Adapter {
+        const self = try allocator.create(Adapter);
+        errdefer allocator.destroy(self);
+        self.* = try init(allocator, window);
+        return self;
+    }
+
+    pub fn destroy(self: *Adapter) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
+    }
+
+    fn init(allocator: std.mem.Allocator, window: *Window) !Adapter {
         var environment = try global.environMap();
         errdefer environment.deinit();
         return .{
@@ -40,7 +57,7 @@ pub const Adapter = struct {
         };
     }
 
-    pub fn deinit(self: *Adapter) void {
+    fn deinit(self: *Adapter) void {
         if (self.foreground_source) |source| {
             _ = glib.Source.remove(source);
             self.foreground_source = null;
@@ -60,13 +77,15 @@ pub const Adapter = struct {
         if (self.ensureForegroundWatch(id)) |_| {} else |err| {
             log.warn("unable to monitor Stratty foreground process error={}", .{err});
         }
-        if (self.controller.creationSequence(id) != null) {
-            self.controller.updateLocation(id, cwd, workspace) catch |err|
+        if (self.controller.containsSurface(id)) {
+            if (self.controller.updateLocation(id, cwd, workspace)) |changed| {
+                if (changed) self.updateLabels();
+            } else |err| {
                 log.warn("unable to update Stratty surface location error={}", .{err});
-            self.updateLabels();
+            }
             return;
         }
-        _ = self.controller.addSurface(.{
+        self.controller.addSurface(.{
             .id = id,
             .cwd = cwd,
             .workspace = workspace,
@@ -90,7 +109,7 @@ pub const Adapter = struct {
     pub fn selected(self: *Adapter, surface: *Surface) void {
         const id = surfaceId(surface);
         if (!self.foregroundOwnsLocation(id)) self.surfaceAttached(surface, null);
-        self.controller.selectSurface(id) catch {};
+        self.controller.selectSurface(id) catch return;
     }
 
     fn foregroundOwnsLocation(self: *const Adapter, id: stratty.controller.SurfaceId) bool {
@@ -100,7 +119,7 @@ pub const Adapter = struct {
         return false;
     }
 
-    pub fn requestRole(self: *Adapter, window: *Window, source: *Surface, role: stratty.Role) bool {
+    pub fn requestRole(self: *Adapter, source: *Surface, role: stratty.Role) bool {
         self.surfaceAttached(source, null);
         self.controller.selectSurface(surfaceId(source)) catch return false;
         const effect = self.controller.requestRole(role) catch |err| {
@@ -112,19 +131,23 @@ pub const Adapter = struct {
             .none => return true,
             .focus => |id| {
                 const target: *Surface = @ptrFromInt(id);
-                window.focusSurface(target);
+                self.window.focusSurface(target);
                 return true;
             },
-            .create => |create| {
-                const cwd = self.allocator.dupeZ(u8, create.cwd) catch return false;
+            .create => |creation| {
+                var reserved = true;
+                defer if (reserved) self.controller.cancelPending(creation.pending_id);
+
+                const cwd = self.allocator.dupeZ(u8, creation.cwd) catch return false;
                 defer self.allocator.free(cwd);
-                const target = window.newContextualTab(cwd) orelse return false;
-                self.surfaceAttached(target, create.cwd);
-                self.controller.updateLocation(surfaceId(target), create.cwd, create.workspace) catch return false;
-                self.controller.bindPendingSurface(create.pending_id, surfaceId(target)) catch |err| {
+                const target = self.window.newContextualTab(cwd) orelse return false;
+                self.surfaceAttached(target, creation.cwd);
+                _ = self.controller.updateLocation(surfaceId(target), creation.cwd, creation.workspace) catch return false;
+                self.controller.bindPendingSurface(creation.pending_id, surfaceId(target)) catch |err| {
                     log.warn("unable to attach pending Stratty target error={}", .{err});
                     return false;
                 };
+                reserved = false;
                 self.updateLabels();
                 return true;
             },
@@ -138,7 +161,7 @@ pub const Adapter = struct {
     ) bool {
         self.surfaceAttached(surface, null);
         const id = surfaceId(surface);
-        if (self.controller.creationSequence(id) == null) return false;
+        if (!self.controller.containsSurface(id)) return false;
 
         const report = stratty.lifecycle.metadata(value.report);
         if (report.owner != null and report.generation != null) {
@@ -156,9 +179,9 @@ pub const Adapter = struct {
         switch (value.kind) {
             .prompt_ready => {
                 self.clearForegroundWatch(id);
-                if (self.controller.promptReady(id)) |queued| {
+                if (self.controller.promptReady(id) catch return false) |command| {
                     const core = surface.core() orelse return false;
-                    _ = core.performBindingAction(.{ .text = queued.command }) catch |err| {
+                    _ = core.performBindingAction(.{ .text = command }) catch |err| {
                         log.warn("unable to queue Stratty command error={}", .{err});
                         return false;
                     };
@@ -187,12 +210,8 @@ pub const Adapter = struct {
                 self.clearForegroundWatch(id);
                 self.controller.commandEnded(id) catch return false;
             },
-            .agent_idle, .agent_running => {
-                _ = self.controller.agentStatus(
-                    id,
-                    if (value.kind == .agent_idle) .idle else .running,
-                ) catch return false;
-            },
+            .agent_idle => _ = self.controller.agentStatus(id, .idle) catch return false,
+            .agent_running => _ = self.controller.agentStatus(id, .running) catch return false,
         }
         self.updateLabels();
         return true;
@@ -281,7 +300,7 @@ pub const Adapter = struct {
     fn pollForeground(self: *Adapter) void {
         var changed = false;
         for (self.foreground_watches.items) |*watch| {
-            if (self.controller.creationSequence(watch.surface_id) == null) continue;
+            if (!self.controller.containsSurface(watch.surface_id)) continue;
             const surface: *Surface = @ptrFromInt(watch.surface_id);
             const core = surface.core() orelse continue;
             const process_group = core.getProcessInfo(.foreground_pid) orelse continue;
@@ -298,7 +317,7 @@ pub const Adapter = struct {
                 const current = self.controller.presentation(watch.surface_id) orelse continue;
                 if (!std.mem.eql(u8, current.cwd, process_cwd)) {
                     const workspace = self.workspace.resolve(process_cwd) catch process_cwd;
-                    self.controller.updateLocation(
+                    _ = self.controller.updateLocation(
                         watch.surface_id,
                         process_cwd,
                         workspace,
@@ -336,8 +355,7 @@ pub const Adapter = struct {
             watch.observed_foreground = true;
             const role = stratty.commands.classifyExecutable(command, self.controller.commands);
             const current = self.controller.presentation(watch.surface_id) orelse continue;
-            if (self.controller.role(watch.surface_id) == role and
-                std.mem.eql(u8, current.activity, command)) continue;
+            if (current.role == role and std.mem.eql(u8, current.activity, command)) continue;
             self.controller.commandStarted(watch.surface_id, .{
                 .role = role,
                 .command = command,
@@ -352,11 +370,38 @@ pub const Adapter = struct {
         if (changed) self.updateLabels();
     }
 
-    pub fn presentation(
+    pub fn rebuildSidebar(
         self: *const Adapter,
-        surface: *Surface,
-    ) ?stratty.controller.Presentation {
-        return self.controller.presentation(surfaceId(surface));
+        list: *gtk.ListBox,
+        tab_view: *adw.TabView,
+        config: *const CoreConfig,
+    ) void {
+        const widget = list.as(gtk.Widget);
+        while (widget.getFirstChild()) |child| list.remove(child);
+
+        var previous_workspace: ?[]const u8 = null;
+        var index: c_int = 0;
+        while (index < tab_view.getNPages()) : (index += 1) {
+            const page = tab_view.getNthPage(index);
+            const tab = gobject.ext.cast(Tab, page.getChild()) orelse continue;
+            const surface = tab.getActiveSurface() orelse continue;
+            const presentation = self.controller.presentation(surfaceId(surface)) orelse continue;
+            if (previous_workspace == null or !std.mem.eql(
+                u8,
+                previous_workspace.?,
+                presentation.workspace,
+            )) {
+                Sidebar.appendHeader(list, self.allocator, presentation.workspace);
+                previous_workspace = presentation.workspace;
+            }
+            Sidebar.appendTab(
+                list,
+                self.allocator,
+                config,
+                presentation,
+                page.getNeedsAttention() != 0,
+            );
+        }
     }
 
     fn updateLabels(self: *Adapter) void {

@@ -48,7 +48,6 @@ pub const AddSurface = struct {
 
 pub const Create = struct {
     pending_id: PendingId,
-    role: Role,
     cwd: []const u8,
     workspace: []const u8,
 };
@@ -57,11 +56,6 @@ pub const Effect = union(enum) {
     none,
     focus: SurfaceId,
     create: Create,
-};
-
-pub const QueueInput = struct {
-    surface_id: SurfaceId,
-    command: []const u8,
 };
 
 pub const Presentation = struct {
@@ -82,7 +76,6 @@ const LaunchPhase = enum {
 const Owner = struct {
     id: []u8,
     generation: u64,
-    active: bool,
 
     fn deinit(self: *Owner, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
@@ -99,6 +92,7 @@ const Surface = struct {
     agent_status: ?Status = null,
     pending_id: ?PendingId = null,
     owners: std.ArrayList(Owner) = .empty,
+    active_owner: ?usize = null,
 
     fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
         allocator.free(self.cwd);
@@ -145,8 +139,8 @@ pub const Controller = struct {
         self.pending.deinit(self.allocator);
     }
 
-    pub fn addSurface(self: *Controller, input: AddSurface) !CreationSequence {
-        if (self.surfaceIndex(input.id) != null) return error.DuplicateSurface;
+    pub fn addSurface(self: *Controller, input: AddSurface) !void {
+        if (self.containsSurface(input.id)) return error.DuplicateSurface;
 
         const cwd = try self.allocator.dupe(u8, input.cwd);
         errdefer self.allocator.free(cwd);
@@ -164,22 +158,10 @@ pub const Controller = struct {
             .workspace = workspace,
             .activity_command = activity,
         });
-        return sequence;
     }
 
-    pub fn attachPendingSurface(
-        self: *Controller,
-        pending_id: PendingId,
-        input: AddSurface,
-    ) !CreationSequence {
-        const pending_index = self.pendingIndex(pending_id) orelse
-            return error.UnknownPendingTarget;
-        if (!std.mem.eql(u8, self.pending.items[pending_index].workspace, input.workspace))
-            return error.WorkspaceMismatch;
-
-        const sequence = try self.addSurface(input);
-        try self.bindPendingSurface(pending_id, input.id);
-        return sequence;
+    pub fn cancelPending(self: *Controller, id: PendingId) void {
+        self.clearPending(id);
     }
 
     pub fn bindPendingSurface(self: *Controller, pending_id: PendingId, surface_id: SurfaceId) !void {
@@ -207,7 +189,7 @@ pub const Controller = struct {
     }
 
     pub fn selectSurface(self: *Controller, id: SurfaceId) !void {
-        if (self.surfaceIndex(id) == null) return error.UnknownSurface;
+        if (!self.containsSurface(id)) return error.UnknownSurface;
         self.selected = id;
     }
 
@@ -216,8 +198,11 @@ pub const Controller = struct {
         id: SurfaceId,
         cwd: []const u8,
         workspace: []const u8,
-    ) !void {
+    ) !bool {
         const surface = self.getSurface(id) orelse return error.UnknownSurface;
+        if (std.mem.eql(u8, surface.cwd, cwd) and
+            std.mem.eql(u8, surface.workspace, workspace)) return false;
+
         const new_cwd = try self.allocator.dupe(u8, cwd);
         errdefer self.allocator.free(new_cwd);
         const new_workspace = try self.allocator.dupe(u8, workspace);
@@ -227,6 +212,7 @@ pub const Controller = struct {
         self.allocator.free(surface.workspace);
         surface.cwd = new_cwd;
         surface.workspace = new_workspace;
+        return true;
     }
 
     /// Focus the oldest eligible target, or atomically reserve a pending
@@ -270,7 +256,6 @@ pub const Controller = struct {
 
         return .{ .create = .{
             .pending_id = pending_id,
-            .role = requested,
             .cwd = selected.cwd,
             .workspace = pending_workspace,
         } };
@@ -278,27 +263,24 @@ pub const Controller = struct {
 
     /// Report the first idle prompt for a pending target. Editor and agent
     /// commands are queued only now, after normal Fish and direnv startup.
-    pub fn promptReady(self: *Controller, id: SurfaceId) ?QueueInput {
+    pub fn promptReady(self: *Controller, id: SurfaceId) !?[]const u8 {
         const surface = self.getSurface(id) orelse return null;
         const pending_id = surface.pending_id orelse {
-            self.setActivity(surface, .shell) catch {};
+            try self.setActivity(surface, .shell);
             return null;
         };
         const pending_index = self.pendingIndex(pending_id) orelse return null;
         const pending = &self.pending.items[pending_index];
 
         if (pending.role == .shell) {
-            self.setActivity(surface, .shell) catch {};
+            try self.setActivity(surface, .shell);
             self.clearPending(pending_id);
             return null;
         }
         if (pending.phase != .waiting_for_prompt) return null;
 
         pending.phase = .input_queued;
-        return .{
-            .surface_id = id,
-            .command = pending.role.command(self.commands).?,
-        };
+        return pending.role.command(self.commands).?;
     }
 
     pub fn commandStarted(self: *Controller, id: SurfaceId, activity: Activity) !void {
@@ -340,33 +322,28 @@ pub const Controller = struct {
         generation: u64,
     ) !bool {
         const surface = self.getSurface(id) orelse return error.UnknownSurface;
-        for (surface.owners.items) |*owner| {
+        for (surface.owners.items, 0..) |*owner, index| {
             if (!std.mem.eql(u8, owner.id, owner_id)) continue;
-            if (!owner.active or generation <= owner.generation) return false;
+            if (surface.active_owner != index or generation <= owner.generation) return false;
             owner.generation = generation;
             return true;
         }
 
-        for (surface.owners.items) |*owner| owner.active = false;
+        const id_copy = try self.allocator.dupe(u8, owner_id);
+        errdefer self.allocator.free(id_copy);
         try surface.owners.append(self.allocator, .{
-            .id = try self.allocator.dupe(u8, owner_id),
+            .id = id_copy,
             .generation = generation,
-            .active = true,
         });
+        surface.active_owner = surface.owners.items.len - 1;
         return true;
     }
 
-    pub fn creationSequence(self: *const Controller, id: SurfaceId) ?CreationSequence {
-        const index = self.surfaceIndex(id) orelse return null;
-        return self.surfaces.items[index].creation_sequence;
+    pub fn containsSurface(self: *const Controller, id: SurfaceId) bool {
+        return self.surfaceIndex(id) != null;
     }
 
-    pub fn role(self: *const Controller, id: SurfaceId) ?Role {
-        const index = self.surfaceIndex(id) orelse return null;
-        return self.effectiveRole(&self.surfaces.items[index]);
-    }
-
-    pub fn pendingCount(self: *const Controller) usize {
+    fn pendingCount(self: *const Controller) usize {
         return self.pending.items.len;
     }
 
@@ -382,13 +359,13 @@ pub const Controller = struct {
     pub fn presentation(self: *const Controller, id: SurfaceId) ?Presentation {
         const surface_index = self.surfaceIndex(id) orelse return null;
         const surface = &self.surfaces.items[surface_index];
-        const activity = activity: {
-            const pending_id = surface.pending_id orelse break :activity surface.activity_command;
-            const pending_index = self.pendingIndex(pending_id) orelse break :activity surface.activity_command;
-            const pending = self.pending.items[pending_index];
-            if (pending.phase == .command_started) break :activity surface.activity_command;
-            break :activity std.fs.path.basename(pending.role.command(self.commands) orelse "shell");
-        };
+        const activity = if (self.pendingForSurface(surface)) |pending|
+            if (pending.phase == .command_started)
+                surface.activity_command
+            else
+                std.fs.path.basename(pending.role.command(self.commands) orelse Activity.shell.command)
+        else
+            surface.activity_command;
         const effective_role = self.effectiveRole(surface);
         return .{
             .workspace = self.effectiveWorkspace(surface),
@@ -406,13 +383,14 @@ pub const Controller = struct {
     }
 
     fn setActivity(self: *Controller, surface: *Surface, activity: Activity) !void {
-        const changed = surface.role != activity.role or
-            !std.mem.eql(u8, surface.activity_command, activity.command);
+        if (surface.role == activity.role and
+            std.mem.eql(u8, surface.activity_command, activity.command)) return;
+
         const command = try self.allocator.dupe(u8, activity.command);
         self.allocator.free(surface.activity_command);
         surface.activity_command = command;
         surface.role = activity.role;
-        if (changed) surface.agent_status = null;
+        surface.agent_status = null;
     }
 
     fn clearPending(self: *Controller, id: PendingId) void {
@@ -425,15 +403,19 @@ pub const Controller = struct {
     }
 
     fn effectiveWorkspace(self: *const Controller, surface: *const Surface) []const u8 {
-        const pending_id = surface.pending_id orelse return surface.workspace;
-        const index = self.pendingIndex(pending_id) orelse return surface.workspace;
-        return self.pending.items[index].workspace;
+        const pending = self.pendingForSurface(surface) orelse return surface.workspace;
+        return pending.workspace;
     }
 
     fn effectiveRole(self: *const Controller, surface: *const Surface) Role {
-        const pending_id = surface.pending_id orelse return surface.role;
-        const index = self.pendingIndex(pending_id) orelse return surface.role;
-        return self.pending.items[index].role;
+        const pending = self.pendingForSurface(surface) orelse return surface.role;
+        return pending.role;
+    }
+
+    fn pendingForSurface(self: *const Controller, surface: *const Surface) ?*const Pending {
+        const id = surface.pending_id orelse return null;
+        const index = self.pendingIndex(id) orelse return null;
+        return &self.pending.items[index];
     }
 
     fn getSurface(self: *Controller, id: SurfaceId) ?*Surface {
@@ -462,7 +444,12 @@ fn add(
     cwd: []const u8,
     workspace: []const u8,
 ) !void {
-    _ = try controller.addSurface(.{ .id = id, .cwd = cwd, .workspace = workspace });
+    try controller.addSurface(.{ .id = id, .cwd = cwd, .workspace = workspace });
+}
+
+fn addPending(controller: *Controller, pending: Create, id: SurfaceId) !void {
+    try add(controller, id, pending.cwd, pending.workspace);
+    try controller.bindPendingSurface(pending.pending_id, id);
 }
 
 test "focus is isolated by workspace and chooses immutable creation age" {
@@ -492,7 +479,10 @@ test "oldest role wins independently of insertion position changes" {
     try controller.selectSurface(10);
 
     try std.testing.expectEqual(Effect{ .focus = 20 }, try controller.requestRole(.agent));
-    try std.testing.expect(controller.creationSequence(20).? < controller.creationSequence(30).?);
+    try std.testing.expect(
+        controller.presentation(20).?.creation_sequence <
+            controller.presentation(30).?.creation_sequence,
+    );
 }
 
 test "creation reserves pending target before the tab exists" {
@@ -508,14 +498,23 @@ test "creation reserves pending target before the tab exists" {
     try std.testing.expectEqual(@as(usize, 1), controller.pendingCount());
     try std.testing.expectEqual(Effect.none, try controller.requestRole(.editor));
 
-    _ = try controller.attachPendingSurface(first.create.pending_id, .{
-        .id = 2,
-        .cwd = first.create.cwd,
-        .workspace = first.create.workspace,
-    });
+    try addPending(&controller, first.create, 2);
     try controller.selectSurface(1);
     try std.testing.expectEqual(Effect{ .focus = 2 }, try controller.requestRole(.editor));
     try std.testing.expectEqual(@as(usize, 1), controller.pendingCount());
+}
+
+test "cancelled creation releases its reservation" {
+    var controller = Controller.init(std.testing.allocator);
+    defer controller.deinit();
+
+    try add(&controller, 1, "/repo", "/repo");
+    try controller.selectSurface(1);
+    const create = (try controller.requestRole(.editor)).create;
+    controller.cancelPending(create.pending_id);
+
+    try std.testing.expectEqual(@as(usize, 0), controller.pendingCount());
+    try std.testing.expect((try controller.requestRole(.editor)) == .create);
 }
 
 test "pending command waits for first prompt and does not duplicate queueing" {
@@ -525,22 +524,17 @@ test "pending command waits for first prompt and does not duplicate queueing" {
     try add(&controller, 1, "/repo", "/repo");
     try controller.selectSurface(1);
     const create = (try controller.requestRole(.agent)).create;
-    _ = try controller.attachPendingSurface(create.pending_id, .{
-        .id = 2,
-        .cwd = create.cwd,
-        .workspace = create.workspace,
-    });
+    try addPending(&controller, create, 2);
 
-    const queued = controller.promptReady(2).?;
-    try std.testing.expectEqual(@as(SurfaceId, 2), queued.surface_id);
-    try std.testing.expectEqualStrings("pi", queued.command);
-    try std.testing.expect(controller.promptReady(2) == null);
-    try std.testing.expectEqual(Role.agent, controller.role(2).?);
+    const command = (try controller.promptReady(2)).?;
+    try std.testing.expectEqualStrings("pi", command);
+    try std.testing.expect((try controller.promptReady(2)) == null);
+    try std.testing.expectEqual(Role.agent, controller.presentation(2).?.role);
 
     try controller.commandStarted(2, .{ .role = .agent, .command = "pi" });
     try std.testing.expectEqual(@as(usize, 0), controller.pendingCount());
     try controller.commandEnded(2);
-    try std.testing.expectEqual(Role.shell, controller.role(2).?);
+    try std.testing.expectEqual(Role.shell, controller.presentation(2).?.role);
 }
 
 test "configured role commands are queued after startup" {
@@ -553,12 +547,8 @@ test "configured role commands are queued after startup" {
     try add(&controller, 1, "/repo", "/repo");
     try controller.selectSurface(1);
     const create = (try controller.requestRole(.editor)).create;
-    _ = try controller.attachPendingSurface(create.pending_id, .{
-        .id = 2,
-        .cwd = create.cwd,
-        .workspace = create.workspace,
-    });
-    try std.testing.expectEqualStrings("/opt/bin/helix", controller.promptReady(2).?.command);
+    try addPending(&controller, create, 2);
+    try std.testing.expectEqualStrings("/opt/bin/helix", (try controller.promptReady(2)).?);
 }
 
 test "failed pending command returns to shell and clears reservation" {
@@ -568,17 +558,13 @@ test "failed pending command returns to shell and clears reservation" {
     try add(&controller, 1, "/repo", "/repo");
     try controller.selectSurface(1);
     const create = (try controller.requestRole(.editor)).create;
-    _ = try controller.attachPendingSurface(create.pending_id, .{
-        .id = 2,
-        .cwd = create.cwd,
-        .workspace = create.workspace,
-    });
-    _ = controller.promptReady(2);
+    try addPending(&controller, create, 2);
+    _ = try controller.promptReady(2);
     try controller.commandStarted(2, .{ .role = .shell, .command = "fish: Unknown command: nvim" });
     try std.testing.expectEqual(@as(usize, 1), controller.pendingCount());
     try controller.commandEnded(2);
     try std.testing.expectEqual(@as(usize, 0), controller.pendingCount());
-    try std.testing.expectEqual(Role.shell, controller.role(2).?);
+    try std.testing.expectEqual(Role.shell, controller.presentation(2).?.role);
 }
 
 test "workspace changes immediately affect eligibility" {
@@ -589,7 +575,8 @@ test "workspace changes immediately affect eligibility" {
     try add(&controller, 2, "/repo-a/src", "/repo-a");
     try controller.commandStarted(2, .{ .role = .editor, .command = "nvim" });
     try controller.selectSurface(1);
-    try controller.updateLocation(2, "/repo-b", "/repo-b");
+    try std.testing.expect(!(try controller.updateLocation(2, "/repo-a/src", "/repo-a")));
+    try std.testing.expect(try controller.updateLocation(2, "/repo-b", "/repo-b"));
 
     const effect = try controller.requestRole(.editor);
     try std.testing.expect(effect == .create);

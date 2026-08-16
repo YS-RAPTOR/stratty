@@ -46,7 +46,7 @@ const ConfigErrorsDialog = @import("config_errors_dialog.zig").ConfigErrorsDialo
 const GlobalShortcuts = @import("global_shortcuts.zig").GlobalShortcuts;
 const OpenURI = @import("../portal.zig").OpenURI;
 const media = @import("../media.zig");
-const StrattySidebar = @import("../stratty/sidebar.zig");
+const Stratty = @import("../stratty.zig");
 
 const log = std.log.scoped(.gtk_ghostty_application);
 
@@ -902,7 +902,7 @@ pub const Application = extern struct {
         // Load standard css first as it can override some of the user configured styling.
         try loadRuntimeCss414(config, writer);
         try loadRuntimeCss416(config, writer);
-        try StrattySidebar.writeCss(config, writer);
+        try Stratty.Sidebar.writeCss(config, writer);
 
         const unfocused_fill: CoreConfig.Color = config.@"unfocused-split-fill" orelse config.background;
 

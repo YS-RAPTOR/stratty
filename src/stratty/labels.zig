@@ -25,7 +25,7 @@ pub const Labeler = struct {
 
     /// Existing assignments never change. A later basename collision receives
     /// the shortest unused parent-qualified suffix.
-    pub fn workspaceLabel(self: *Labeler, identity: []const u8) ![]const u8 {
+    fn workspaceLabel(self: *Labeler, identity: []const u8) ![]const u8 {
         for (self.workspaces.items) |workspace| {
             if (std.mem.eql(u8, workspace.identity, identity)) return workspace.label;
         }

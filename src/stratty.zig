@@ -12,7 +12,6 @@ pub const workspace = @import("stratty/workspace.zig");
 
 pub const Controller = controller.Controller;
 pub const Role = controller.Role;
-pub const Commands = controller.Commands;
 
 test {
     _ = controller;

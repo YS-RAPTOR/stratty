@@ -1138,46 +1138,28 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             try self.selectionScrollTick();
         },
 
-        .agent_status => |status| {
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .shell_lifecycle,
-                .{
-                    .kind = switch (status) {
-                        .idle => .agent_idle,
-                        .running => .agent_running,
-                    },
-                    .report = "",
-                },
-            );
-        },
+        .agent_status => |status| try self.reportShellLifecycle(
+            switch (status) {
+                .idle => .agent_idle,
+                .running => .agent_running,
+            },
+            "",
+        ),
 
         .prompt_ready => |report| {
             defer report.deinit();
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .shell_lifecycle,
-                .{ .kind = .prompt_ready, .report = report.slice() },
-            );
+            try self.reportShellLifecycle(.prompt_ready, report.slice());
         },
 
         .start_command => |report| {
             defer report.deinit();
             self.command_timer = .now(global.io(), .awake);
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .shell_lifecycle,
-                .{ .kind = .command_started, .report = report.slice() },
-            );
+            try self.reportShellLifecycle(.command_started, report.slice());
         },
 
         .stop_command => |v| timer: {
             defer v.report.deinit();
-            _ = try self.rt_app.performAction(
-                .{ .surface = self },
-                .shell_lifecycle,
-                .{ .kind = .command_ended, .report = v.report.slice() },
-            );
+            try self.reportShellLifecycle(.command_ended, v.report.slice());
 
             const end: std.Io.Timestamp = .now(global.io(), .awake);
             const start = self.command_timer orelse break :timer;
@@ -1221,6 +1203,18 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             );
         },
     }
+}
+
+fn reportShellLifecycle(
+    self: *Surface,
+    kind: apprt.action.ShellLifecycle.Kind,
+    report: []const u8,
+) !void {
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .shell_lifecycle,
+        .{ .kind = kind, .report = report },
+    );
 }
 
 fn selectionScrollTick(self: *Surface) !void {

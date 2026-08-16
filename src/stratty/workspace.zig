@@ -89,10 +89,8 @@ fn readToEndAlloc(
 }
 
 fn canonicalPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
-    const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator) catch
-        return allocator.dupe(u8, path);
-    defer allocator.free(resolved);
-    return allocator.dupe(u8, resolved);
+    return std.Io.Dir.cwd().realPathFileAlloc(io, path, allocator) catch
+        allocator.dupe(u8, path);
 }
 
 test "workspace resolver groups nested directories by canonical Git root" {
