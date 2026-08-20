@@ -182,7 +182,7 @@ pub const UnknownSequence = union(Tag) {
         // A future borrowed CSI payload may need parameter, separator, and
         // intermediate arrays. Reserve 128 bytes so that representation and
         // other structured sequence types can be added without an ABI break.
-        [16]u64,
+        .{ .padding = [16]u64 },
     );
     pub const C = c_union.C;
     pub const CValue = c_union.CValue;
@@ -272,9 +272,10 @@ const Effects = struct {
     /// and its content are borrowed for the callback duration.
     pub const UnknownSequenceFn = *const fn (Terminal, ?*anyopaque, *const UnknownSequence.C) callconv(lib.calling_conv) void;
 
-    /// C function pointer type for the size callback.
-    /// Returns true and fills out_size if size is available,
-    /// or returns false to silently ignore the query.
+    /// C function pointer type for the size callback. Used by XTWINOPS queries
+    /// and VT-driven mode 2048 enable reports. Returns true and fills out_size
+    /// if size is available, or false to suppress the XTWINOPS response or
+    /// mode 2048 report.
     pub const SizeFn = *const fn (Terminal, ?*anyopaque, *size_report.Size) callconv(lib.calling_conv) bool;
 
     /// C function pointer type for the device_attributes callback.
@@ -579,12 +580,15 @@ pub const FromDecodedError = error{
 /// This function consumes `io` on every path. The decoded terminal is
 /// transferred only after its final heap address has been allocated; its
 /// continuation remains in `decoded` and is replayed before returning.
-/// Replay uses a temporary exact-size tracker which is disabled before the
-/// terminal crosses the C ABI, restoring the ordinary C default policy.
+/// `continuation_max_bytes` selects the returned terminal's tracking policy:
+/// zero uses a temporary exact-size tracker and restores the ordinary C
+/// default before returning, while a nonzero value leaves tracking enabled
+/// with that limit.
 pub fn fromDecoded(
     alloc: std.mem.Allocator,
     io: Io,
     decoded: *snapshot_core.Decoded,
+    continuation_max_bytes: usize,
 ) FromDecodedError!Terminal {
     const native = alloc.create(ZigTerminal) catch {
         io.deinit(alloc);
@@ -596,11 +600,18 @@ pub fn fromDecoded(
         .ground => "",
         .bytes => |bytes| bytes,
     };
+    assert(continuation_max_bytes == 0 or
+        continuation.len <= continuation_max_bytes);
 
-    // Non-ground state needs tracking only long enough to verify that replay
-    // reconstructed the exact canonical continuation. Ground state needs no
-    // tracker at all.
-    const terminal = wrap(alloc, native, io, continuation.len) catch |err| {
+    // Without opt-in retention, non-ground state needs tracking only long
+    // enough to verify that replay reconstructed the exact canonical
+    // continuation. With retention, even ground state needs a tracker so its
+    // continuation can be exported successfully as an empty slice.
+    const tracker_max_bytes = if (continuation_max_bytes > 0)
+        continuation_max_bytes
+    else
+        continuation.len;
+    const terminal = wrap(alloc, native, io, tracker_max_bytes) catch |err| {
         native.deinit(alloc);
         alloc.destroy(native);
         io.deinit(alloc);
@@ -610,8 +621,8 @@ pub fn fromDecoded(
 
     if (continuation.len > 0) {
         restoreContinuation(terminal, continuation) catch |err| return switch (err) {
-            // The decoded bytes exactly fit this fresh tracker's cap, so
-            // losing them while replaying can only be an allocation failure.
+            // The decoded bytes fit this fresh tracker's cap, so losing them
+            // while replaying can only be an allocation failure.
             error.OutOfMemory,
             error.ContinuationUnavailable,
             => error.OutOfMemory,
@@ -621,9 +632,12 @@ pub fn fromDecoded(
         };
     }
 
-    // Decoder validation limits are not terminal runtime policy. A restored
-    // terminal always starts with the same disabled tracking default as new.
-    setContinuationMaxBytes(terminal.?, default_continuation_max_bytes);
+    // Unless the decoder opted into retention, restore the same disabled
+    // tracking default used by newly created C terminals. Disabling tracking
+    // does not alter the parser or UTF-8 state reconstructed above.
+    if (continuation_max_bytes == 0) {
+        setContinuationMaxBytes(terminal.?, default_continuation_max_bytes);
+    }
     return terminal;
 }
 
@@ -810,15 +824,20 @@ pub fn continuation_write(
 
     // The callback was validated above, so invalid_write can only mean output
     // accounting overflow. Keep that distinct from callback rejection.
-    var adapter: c_io.WriterAdapter = .init(writer);
-    continuationWriteIo(terminal_, &adapter.interface) catch |err| {
-        if (err == error.WriteFailed) {
-            if (adapter.invalid_write) return .limit_exceeded;
-            if (adapter.callback_failed) return .io_error;
-        }
-        return continuationErrorResult(err);
-    };
-    return .success;
+    var buffer: [c_io.WriterAdapter.recommended_buffer_len]u8 = undefined;
+    var adapter: c_io.WriterAdapter = .initBuffered(writer, &buffer);
+    write: {
+        continuationWriteIo(terminal_, &adapter.interface) catch |err| switch (err) {
+            error.WriteFailed => break :write,
+            else => return continuationErrorResult(err),
+        };
+        adapter.interface.flush() catch break :write;
+        return .success;
+    }
+
+    if (adapter.invalid_write) return .limit_exceeded;
+    if (adapter.callback_failed) return .io_error;
+    return continuationErrorResult(error.WriteFailed);
 }
 
 pub fn continuation_buf(
@@ -4653,6 +4672,109 @@ test "size without callback is silent" {
 
     // CSI 18 t without a size callback should not crash
     vt_write(t, "\x1B[18t", 5);
+}
+
+test "mode 2048 enable and disable use C callbacks" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var data: [128]u8 = undefined;
+        var len: usize = 0;
+        var calls: usize = 0;
+
+        fn writePty(_: Terminal, _: ?*anyopaque, ptr: [*]const u8, length: usize) callconv(lib.calling_conv) void {
+            @memcpy(data[0..length], ptr[0..length]);
+            len = length;
+            calls += 1;
+        }
+
+        fn sizeCb(_: Terminal, _: ?*anyopaque, out_size: *size_report.Size) callconv(lib.calling_conv) bool {
+            out_size.* = .{
+                .rows = 24,
+                .columns = 80,
+                .cell_width = 8,
+                .cell_height = 16,
+            };
+            return true;
+        }
+    };
+    S.len = 0;
+    S.calls = 0;
+
+    try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
+    try testing.expectEqual(Result.success, set(t, .size_cb, @ptrCast(&S.sizeCb)));
+
+    const enable = "\x1B[?2048h";
+    const disable = "\x1B[?2048l";
+    vt_write(t, enable, enable.len);
+    vt_write(t, enable, enable.len);
+
+    try testing.expectEqual(@as(usize, 2), S.calls);
+    try testing.expectEqualStrings("\x1B[48;24;80;384;640t", S.data[0..S.len]);
+    vt_write(t, disable, disable.len);
+
+    try testing.expectEqual(@as(usize, 2), S.calls);
+    try testing.expect(!t.?.terminal.modes.get(.in_band_size_reports));
+}
+
+test "mode 2048 enable tolerates missing C callbacks" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var writes: usize = 0;
+        var sizes: usize = 0;
+
+        fn writePty(_: Terminal, _: ?*anyopaque, _: [*]const u8, _: usize) callconv(lib.calling_conv) void {
+            writes += 1;
+        }
+
+        fn sizeCb(_: Terminal, _: ?*anyopaque, out_size: *size_report.Size) callconv(lib.calling_conv) bool {
+            sizes += 1;
+            out_size.* = .{
+                .rows = 24,
+                .columns = 80,
+                .cell_width = 8,
+                .cell_height = 16,
+            };
+            return true;
+        }
+    };
+    S.writes = 0;
+    S.sizes = 0;
+
+    try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
+
+    const sequence = "\x1B[?2048h";
+    vt_write(t, sequence, sequence.len);
+
+    try testing.expectEqual(@as(usize, 0), S.writes);
+    try testing.expect(t.?.terminal.modes.get(.in_band_size_reports));
+    var no_write: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &no_write,
+        80,
+        24,
+    ));
+    defer free(no_write);
+    try testing.expectEqual(Result.success, set(no_write, .size_cb, @ptrCast(&S.sizeCb)));
+    vt_write(no_write, sequence, sequence.len);
+    try testing.expectEqual(@as(usize, 1), S.sizes);
+    try testing.expect(no_write.?.terminal.modes.get(.in_band_size_reports));
 }
 
 test "set device_attributes callback primary" {
